@@ -66,6 +66,7 @@ async def handle_log_action(request):
 app = web.Application()
 app.router.add_get('/check_user/{user_id}', handle_check_user)
 app.router.add_post('/log_action', handle_log_action)
+app.router.add_post('/ticket_opened', handle_ticket_opened)
 
 async def start_web_server():
     runner = web.AppRunner(app)
@@ -92,71 +93,56 @@ async def on_ready():
     keep_alive.start()
     asyncio.create_task(start_web_server())
 
-@bot.event
-async def on_guild_channel_create(channel):
-    """Feature 2 & 3: Ticket Trigger and Report Output."""
-    # Logic to identify ticket channels (e.g., name starts with 'ticket-' or in specific category)
-    if "ticket-" in channel.name.lower():
-        await asyncio.sleep(2) # Wait for ticket systems to set permissions
-        
-        # Try to find the user who opened the ticket
-        # Most ticket bots name the channel after the user or mention them
-        user = None
-        async for message in channel.history(limit=10):
-            if message.mentions:
-                user = message.mentions[0]
-                break
-        
-        if not user:
-            # Fallback: try to find user by name in channel title
-            username = channel.name.replace("ticket-", "")
-            user = discord.utils.find(lambda m: m.name.lower() == username.lower(), channel.guild.members)
+# --- API Extension for Remote Triggers ---
 
-        if user:
-            await channel.send(f"🔍 Fetching context for {user.mention}...")
-            messages = await fetcher.fetch_context(user, channel.guild)
+async def handle_ticket_opened(request):
+    """
+    Called by Hot Topic Bot when a ticket opens.
+    Expects JSON: {guild_id, user_id, username, messages: [...]}
+    """
+    try:
+        data = await request.json()
+        user_id = data['user_id']
+        username = data['username']
+        messages = data['messages']
+        
+        if messages:
+            # Create a mock user object for transcript generator
+            class MockUser:
+                def __init__(self, name, id):
+                    self.name = name
+                    self.id = id
+                def __str__(self): return self.name
+
+            filepath, filename = fetcher.generate_transcript(messages, MockUser(username, user_id))
             
-            if messages:
-                filepath, filename = fetcher.generate_transcript(messages, user)
-                
-                # Feature 3: Report Output (Embed)
-                embed = discord.Embed(title="📄 Moderation Context Report", color=discord.Color.gold())
-                embed.add_field(name="User", value=f"{user} ({user.id})", inline=True)
-                embed.add_field(name="Messages Found", value=str(len(messages)), inline=True)
-                
-                # Parse timestamps from ISO format
-                first_ts = datetime.fromisoformat(messages[0]['timestamp']).strftime('%H:%M')
-                last_ts = datetime.fromisoformat(messages[-1]['timestamp']).strftime('%H:%M')
-                embed.add_field(name="Time Span", value=f"{first_ts} - {last_ts}", inline=False)
-                
-                # Bullet points for last few actions (if any)
-                history = db.get_all_cases(user.id)
-                if history:
-                    bullets = "\n".join([f"• {h['action']} - {h['reason']}" for h in history[:3]])
-                    embed.add_field(name="Recent History", value=bullets, inline=False)
-                
-                await channel.send(embed=embed)
-                await channel.send(file=discord.File(filepath, filename=filename))
-            else:
-                await channel.send("No recent message context found (5-minute silence gap reached immediately).")
+            # Get history
+            history = db.get_all_cases(user_id)
+            history_bullets = "\n".join([f"• {h['action']} - {h['reason']}" for h in history[:3]]) if history else "None"
+            
+            with open(filepath, 'r') as f:
+                content = f.read()
 
-@bot.event
-async def on_member_join(member):
-    """Feature 6: Verification Check on member join."""
-    bans = db.get_user_bans(member.id)
-    if bans:
-        logger.info(f"🚨 BANNED USER ATTEMPTED TO JOIN: {member} ({member.id})")
-        if BAN_BOT_LOG_CHANNEL_ID:
-            channel = bot.get_channel(BAN_BOT_LOG_CHANNEL_ID)
-            if channel:
-                embed = discord.Embed(
-                    title="⚠️ Banned User Rejoined",
-                    description=f"User {member.mention} ({member.id}) is in the ban database.",
-                    color=discord.Color.red(),
-                    timestamp=datetime.utcnow()
-                )
-                embed.add_field(name="Previous Reason", value=bans[0]['reason'])
-                await channel.send(embed=embed)
+            # Log the case in the Ban Server database
+            db.log_ban(
+                user_id=user_id,
+                username=username,
+                mod_id=0, # System triggered
+                reason="Ticket Context Fetch",
+                action="CONTEXT",
+                transcript_path=filepath
+            )
+            
+            return web.json_response({
+                "status": "success",
+                "transcript_filename": filename,
+                "transcript_content": content,
+                "history_bullets": history_bullets,
+                "message_count": len(messages)
+            })
+        return web.json_response({"status": "no_context"})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
 
 # --- Commands ---
 @bot.command(name="log")
