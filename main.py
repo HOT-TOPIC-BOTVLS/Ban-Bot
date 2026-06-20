@@ -93,56 +93,84 @@ async def on_ready():
     keep_alive.start()
     asyncio.create_task(start_web_server())
 
-# --- API Extension for Remote Triggers ---
+# --- Feature 2 & 3: Ticket Trigger in Ban Server ---
 
-async def handle_ticket_opened(request):
+@bot.event
+async def on_guild_channel_create(channel):
     """
-    Called by Hot Topic Bot when a ticket opens.
-    Expects JSON: {guild_id, user_id, username, messages: [...]}
+    Triggered when a ticket channel is created in the BAN SERVER.
+    It will request context from the HOT TOPIC BOT in the MAIN SERVER.
     """
-    try:
-        data = await request.json()
-        user_id = data['user_id']
-        username = data['username']
-        messages = data['messages']
+    if "ticket-" in channel.name.lower():
+        await asyncio.sleep(2)
         
-        if messages:
-            # Create a mock user object for transcript generator
-            class MockUser:
-                def __init__(self, name, id):
-                    self.name = name
-                    self.id = id
-                def __str__(self): return self.name
-
-            filepath, filename = fetcher.generate_transcript(messages, MockUser(username, user_id))
+        # Identify the user from the channel name or mentions
+        user_id = None
+        username = channel.name.replace("ticket-", "")
+        
+        # Attempt to find user ID if it's in the name (e.g., ticket-123456789)
+        if username.isdigit():
+            user_id = int(username)
+        else:
+            # Fallback: Check mentions
+            async for message in channel.history(limit=5):
+                if message.mentions:
+                    user_id = message.mentions[0].id
+                    username = str(message.mentions[0])
+                    break
+        
+        if user_id:
+            await channel.send(f"🔍 *Requesting context from Main Server for User ID: {user_id}...*")
             
-            # Get history
-            history = db.get_all_cases(user_id)
-            history_bullets = "\n".join([f"• {h['action']} - {h['reason']}" for h in history[:3]]) if history else "None"
+            # Request from Hot Topic Bot API
+            main_server_guild_id = os.getenv("MAIN_SERVER_ID") # Set this in config
+            api_url = f"{os.getenv('HOT_TOPIC_API_URL')}/api/fetch_context/{main_server_guild_id}/{user_id}"
             
-            with open(filepath, 'r') as f:
-                content = f.read()
-
-            # Log the case in the Ban Server database
-            db.log_ban(
-                user_id=user_id,
-                username=username,
-                mod_id=0, # System triggered
-                reason="Ticket Context Fetch",
-                action="CONTEXT",
-                transcript_path=filepath
-            )
-            
-            return web.json_response({
-                "status": "success",
-                "transcript_filename": filename,
-                "transcript_content": content,
-                "history_bullets": history_bullets,
-                "message_count": len(messages)
-            })
-        return web.json_response({"status": "no_context"})
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
+            async with aiohttp.ClientSession() as session:
+                try:
+                    async with session.get(api_url) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            messages = data.get("messages", [])
+                            witnesses = data.get("witnesses", [])
+                            
+                            if messages:
+                                # Generate transcript
+                                class MockUser:
+                                    def __init__(self, name, id):
+                                        self.name = name
+                                        self.id = id
+                                    def __str__(self): return self.name
+                                
+                                filepath, filename = fetcher.generate_transcript(messages, MockUser(username, user_id))
+                                
+                                # Create Embed Report
+                                embed = discord.Embed(title="🔨 Action-Based Report", color=discord.Color.red())
+                                embed.add_field(name="Target User", value=f"{username} ({user_id})", inline=True)
+                                embed.add_field(name="Moderator", value=f"System (Triggered in Ban Server)", inline=True)
+                                embed.add_field(name="Time", value=datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC'), inline=False)
+                                
+                                if witnesses:
+                                    embed.add_field(name="Witnesses", value=", ".join(witnesses), inline=False)
+                                
+                                # Add history bullets from Ban Bot's own database
+                                history = db.get_all_cases(user_id)
+                                if history:
+                                    bullets = "\n".join([f"• {h['action']} - {h['reason']}" for h in history[:3]])
+                                    embed.add_field(name="Previous Actions", value=bullets, inline=False)
+                                
+                                await channel.send(embed=embed)
+                                await channel.send(file=discord.File(filepath, filename=filename))
+                                
+                                # Log to database
+                                db.log_ban(user_id, username, 0, "Ticket Context Fetch", "REPORT", filepath)
+                            else:
+                                await channel.send("⚠️ No recent message context found in Main Server.")
+                        else:
+                            await channel.send(f"❌ Error: Hot Topic API returned status {resp.status}")
+                except Exception as e:
+                    await channel.send(f"❌ Connection Error: Could not reach Main Server API.")
+                    logger.error(f"API Error: {e}")
 
 # --- Commands ---
 @bot.command(name="log")
