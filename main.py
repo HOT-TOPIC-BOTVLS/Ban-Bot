@@ -146,12 +146,16 @@ async def on_guild_channel_create(channel):
                                 
                                 # Create Embed Report
                                 embed = discord.Embed(title="🔨 Action-Based Report", color=discord.Color.red())
-                                embed.add_field(name="Target User", value=f"{username} ({user_id})", inline=True)
-                                embed.add_field(name="Moderator", value=f"System (Triggered in Ban Server)", inline=True)
-                                embed.add_field(name="Time", value=datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC'), inline=False)
+                                embed.add_field(name="User", value=f"{data.get('username')} ({user_id})", inline=True)
+                                embed.add_field(name="Legacy Name", value=data.get('legacy_name'), inline=True)
+                                embed.add_field(name="Server Nickname", value=data.get('nickname'), inline=True)
+                                embed.add_field(name="Moderator", value=f"System (Ban Server Ticket)", inline=True)
+                                embed.add_field(name="Action Time", value=datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC'), inline=True)
                                 
                                 if witnesses:
                                     embed.add_field(name="Witnesses", value=", ".join(witnesses), inline=False)
+                                
+                                embed.add_field(name="Action Bullets", value="• Context Fetched\n• Transcript Generated\n• History Logged", inline=False)
                                 
                                 # Add history bullets from Ban Bot's own database
                                 history = db.get_all_cases(user_id)
